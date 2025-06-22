@@ -1,0 +1,299 @@
+{
+  "name": "Telegram RAG with Memory Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "id": "telegram-trigger",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram-credentials",
+          "name": "Telegram Bot Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-1",
+              "leftValue": "={{ $json.message.text }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "isNotEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "filter-text-messages",
+      "name": "Filter Text Messages Only",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT conversation_history FROM user_conversations WHERE user_id = $1 AND channel_id = $2 ORDER BY created_at DESC LIMIT 1",
+        "additionalFields": {
+          "queryParameters": "={{ [$json.message.from.id, $json.message.chat.id] }}"
+        }
+      },
+      "id": "get-conversation-history",
+      "name": "Get Conversation History",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [680, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credentials",
+          "name": "PostgreSQL Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract message details from Telegram trigger\nconst telegramData = $input.first().json;\nconst message = telegramData.message;\n\n// Parse conversation history from database\nlet conversationHistory = [];\nif ($input.all().length > 1 && $input.all()[1].json.conversation_history) {\n  conversationHistory = JSON.parse($input.all()[1].json.conversation_history);\n}\n\n// Prepare the payload for FastAPI RAG endpoint\nconst ragPayload = {\n  query: message.text,\n  user_id: message.from.id,\n  conversation_history: conversationHistory,\n  metadata: {\n    channel_id: message.chat.id,\n    message_id: message.message_id,\n    timestamp: new Date(message.date * 1000).toISOString(),\n    user_name: message.from.first_name + (message.from.last_name ? ' ' + message.from.last_name : ''),\n    chat_type: message.chat.type\n  }\n};\n\n// Also prepare data for storing back to conversation memory\nconst contextData = {\n  user_id: message.from.id,\n  channel_id: message.chat.id,\n  user_message: message.text,\n  timestamp: new Date().toISOString(),\n  telegram_message_id: message.message_id,\n  conversation_history: conversationHistory\n};\n\nreturn {\n  rag_payload: ragPayload,\n  context_data: contextData,\n  telegram_data: telegramData\n};"
+      },
+      "id": "prepare-rag-request",
+      "name": "Prepare RAG Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:8000/query",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": []
+        },
+        "jsonBody": "={{ $json.rag_payload }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "call-fastapi-rag",
+      "name": "Call FastAPI RAG",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the RAG response and context data\nconst ragResponse = $input.first().json;\nconst contextData = $input.first().json.context_data;\n\n// Update conversation history with the new exchange\nlet updatedHistory = contextData.conversation_history || [];\n\n// Add the new user message and AI response\nupdatedHistory.push({\n  role: 'user',\n  content: contextData.user_message,\n  timestamp: contextData.timestamp\n});\n\nupdatedHistory.push({\n  role: 'assistant', \n  content: ragResponse.response || ragResponse.answer,\n  timestamp: new Date().toISOString(),\n  sources: ragResponse.sources || []\n});\n\n// Keep only last 10 exchanges (20 messages) to manage memory size\nif (updatedHistory.length > 20) {\n  updatedHistory = updatedHistory.slice(-20);\n}\n\n// Prepare data for database update\nconst dbUpdateData = {\n  user_id: contextData.user_id,\n  channel_id: contextData.channel_id,\n  conversation_history: JSON.stringify(updatedHistory),\n  last_message_at: new Date().toISOString(),\n  rag_response: ragResponse.response || ragResponse.answer\n};\n\n// Prepare Telegram response with sources (if any)\nlet responseText = ragResponse.response || ragResponse.answer;\n\n// Add sources to the response if available\nif (ragResponse.sources && ragResponse.sources.length > 0) {\n  responseText += '\\n\\n📚 *Sources:*\\n';\n  ragResponse.sources.forEach((source, index) => {\n    responseText += `${index + 1}. ${source}\\n`;\n  });\n}\n\nconst telegramResponse = {\n  chat_id: contextData.channel_id,\n  text: responseText,\n  parse_mode: 'Markdown',\n  reply_to_message_id: contextData.telegram_message_id\n};\n\nreturn {\n  db_update: dbUpdateData,\n  telegram_response: telegramResponse,\n  rag_data: ragResponse\n};"
+      },
+      "id": "process-rag-response",
+      "name": "Process RAG Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO user_conversations (user_id, channel_id, conversation_history, last_message_at, created_at) VALUES ($1, $2, $3, $4, NOW()) ON CONFLICT (user_id, channel_id) DO UPDATE SET conversation_history = $3, last_message_at = $4, updated_at = NOW()",
+        "additionalFields": {
+          "queryParameters": "={{ [$json.db_update.user_id, $json.db_update.channel_id, $json.db_update.conversation_history, $json.db_update.last_message_at] }}"
+        }
+      },
+      "id": "update-conversation-memory",
+      "name": "Update Conversation Memory",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1560, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credentials",
+          "name": "PostgreSQL Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $json.telegram_response.chat_id }}",
+        "text": "={{ $json.telegram_response.text }}",
+        "additionalFields": {
+          "parse_mode": "Markdown",
+          "reply_to_message_id": "={{ $json.telegram_response.reply_to_message_id }}"
+        }
+      },
+      "id": "send-telegram-response",
+      "name": "Send Telegram Response",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [1780, 300],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram-credentials",
+          "name": "Telegram Bot Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Error handling for failed RAG API calls\nconst error = $input.first().json;\nconst contextData = $input.first().json.context_data;\n\n// Log error details\nconsole.error('RAG API Error:', error);\n\n// Prepare fallback response\nconst fallbackResponse = {\n  chat_id: contextData.channel_id,\n  text: '⚠️ Sorry, I encountered an issue processing your request. Please try again later.',\n  parse_mode: 'Markdown',\n  reply_to_message_id: contextData.telegram_message_id\n};\n\nreturn {\n  telegram_response: fallbackResponse,\n  error_details: error\n};"
+      },
+      "id": "handle-rag-error",
+      "name": "Handle RAG Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 500]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $json.telegram_response.chat_id }}",
+        "text": "={{ $json.telegram_response.text }}",
+        "additionalFields": {
+          "parse_mode": "Markdown",
+          "reply_to_message_id": "={{ $json.telegram_response.reply_to_message_id }}"
+        }
+      },
+      "id": "send-error-response",
+      "name": "Send Error Response",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [1340, 500],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram-credentials",
+          "name": "Telegram Bot Credentials"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Filter Text Messages Only",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Text Messages Only": {
+      "main": [
+        [
+          {
+            "node": "Get Conversation History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Conversation History": {
+      "main": [
+        [
+          {
+            "node": "Prepare RAG Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare RAG Request": {
+      "main": [
+        [
+          {
+            "node": "Call FastAPI RAG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call FastAPI RAG": {
+      "main": [
+        [
+          {
+            "node": "Process RAG Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "error": [
+        [
+          {
+            "node": "Handle RAG Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process RAG Response": {
+      "main": [
+        [
+          {
+            "node": "Update Conversation Memory",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send Telegram Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle RAG Error": {
+      "main": [
+        [
+          {
+            "node": "Send Error Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2024-01-01T00:00:00.000Z",
+  "versionId": "1"
+}
