@@ -2,11 +2,6 @@
 
 This project implements a Microsoft Teams RAG workflow that processes user queries from Teams messages, sends them to a FastAPI RAG backend, and returns responses sourced from an enterprise knowledge base stored in a PostgreSQL table.
 
-This README provides complete setup instructions for the n8n Teams RAG workflow that processes Microsoft Teams messages and responds using a FastAPI RAG backend.
-
-The question owner accepted this as the best answer Jan 24, 2013 at 6:00.
-Try this markdown:
-
 ![alt text](https://github.com/Anshumaan031/Teams-RAG-Workflow-for-Enterprise-Knowledge-Base/blob/main/photo.png)
 
 ## Prerequisites
