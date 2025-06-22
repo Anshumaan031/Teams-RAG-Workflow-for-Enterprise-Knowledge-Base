@@ -4,6 +4,11 @@ This project implements a Microsoft Teams RAG workflow that processes user queri
 
 This README provides complete setup instructions for the n8n Teams RAG workflow that processes Microsoft Teams messages and responds using a FastAPI RAG backend.
 
+The question owner accepted this as the best answer Jan 24, 2013 at 6:00.
+Try this markdown:
+
+![alt text](https://github.com/Anshumaan031/Teams-RAG-Workflow-for-Enterprise-Knowledge-Base/blob/main/photo.png)
+
 ## Prerequisites
 
 - n8n instance with public URL access
